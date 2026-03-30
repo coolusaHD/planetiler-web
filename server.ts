@@ -2,8 +2,7 @@ import express, { type Request, type Response } from 'express';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import { Readable } from 'stream';
-import { pipeline } from 'stream/promises';
+import rateLimit from 'express-rate-limit';
 
 const PORT = Number(process.env.PORT || 8080);
 const PLANETILER_JAR = process.env.PLANETILER_JAR || path.join(__dirname, 'planetiler.jar');
@@ -11,6 +10,7 @@ const JAVA_XMX = process.env.JAVA_XMX || '4G';
 const INPUT_FILE = process.env.INPUT_FILE || '/data/input/input.osm.pbf';
 const OUTPUT_DIR = process.env.OUTPUT_DIR || '/data/output';
 const GENERATE_RATE_LIMIT_MS = Number(process.env.GENERATE_RATE_LIMIT_MS || 10000);
+const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX || 5);
 const MAIN_OSM_URL =
   process.env.MAIN_OSM_URL ||
   'https://download.geofabrik.de/europe/germany/baden-wuerttemberg-latest.osm.pbf';
@@ -22,12 +22,93 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/output', express.static(OUTPUT_DIR));
+app.set('trust proxy', 1);
 
 const clients = new Set<Response>();
-const lastGenerateRequestByIp = new Map<string, number>();
 let currentProcess: ReturnType<typeof spawn> | null = null;
 let generationInProgress = false;
 let downloadInProgress = false;
+
+const actionRateLimiter = rateLimit({
+  windowMs: GENERATE_RATE_LIMIT_MS,
+  limit: RATE_LIMIT_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please wait before retrying' }
+});
+
+function parseAndValidateExtraArgs(extraArgsInput: unknown): { args: string[]; error?: string } {
+  if (extraArgsInput == null || extraArgsInput === '') {
+    return { args: [] };
+  }
+  if (typeof extraArgsInput !== 'string') {
+    return { args: [], error: 'extraArgs must be a string' };
+  }
+
+  const entries = extraArgsInput
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (entries.length > 100) {
+    return { args: [], error: 'Too many extra args (max 100 lines)' };
+  }
+
+  for (const entry of entries) {
+    if (entry.length > 200) {
+      return { args: [], error: `Argument too long: ${entry.slice(0, 40)}...` };
+    }
+    if (!entry.startsWith('--')) {
+      return { args: [], error: `Invalid argument format: ${entry}` };
+    }
+    const keyPart = entry.includes('=') ? entry.slice(0, entry.indexOf('=')) : entry;
+    if (/\s/.test(keyPart)) {
+      return { args: [], error: `Invalid argument key: ${entry}` };
+    }
+    if (
+      entry.startsWith('--osm_path=') ||
+      entry.startsWith('--output=') ||
+      entry.startsWith('--bbox=') ||
+      entry === '--osm_path' ||
+      entry === '--output' ||
+      entry === '--bbox'
+    ) {
+      return { args: [], error: `Overriding protected argument is not allowed: ${entry}` };
+    }
+  }
+
+  return { args: entries };
+}
+
+async function downloadToFile(stream: ReadableStream<Uint8Array>, destination: string): Promise<void> {
+  const reader = stream.getReader();
+  const fileStream = fs.createWriteStream(destination);
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (!value) {
+        continue;
+      }
+      if (!fileStream.write(Buffer.from(value))) {
+        await new Promise<void>((resolve, reject) => {
+          fileStream.once('drain', resolve);
+          fileStream.once('error', reject);
+        });
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    fileStream.end(() => resolve());
+    fileStream.once('error', reject);
+  });
+}
 
 function broadcast(payload: unknown): void {
   const message = `data: ${JSON.stringify(payload)}\n\n`;
@@ -55,16 +136,7 @@ app.get('/events', (req: Request, res: Response) => {
   });
 });
 
-app.post('/generate', (req: Request, res: Response) => {
-  const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
-  const now = Date.now();
-  const lastRequest = lastGenerateRequestByIp.get(clientIp) || 0;
-
-  if (now - lastRequest < GENERATE_RATE_LIMIT_MS) {
-    return res.status(429).json({ error: 'Too many requests, please wait before retrying' });
-  }
-  lastGenerateRequestByIp.set(clientIp, now);
-
+app.post('/generate', actionRateLimiter, (req: Request, res: Response) => {
   if (generationInProgress) {
     return res.status(409).json({ error: 'A generation process is already running' });
   }
@@ -76,9 +148,27 @@ app.post('/generate', (req: Request, res: Response) => {
   const minY = Number(req.body?.minY);
   const maxX = Number(req.body?.maxX);
   const maxY = Number(req.body?.maxY);
+  const minZoomRaw = req.body?.minZoom;
+  const maxZoomRaw = req.body?.maxZoom;
 
   if (![minX, minY, maxX, maxY].every(Number.isFinite) || minX >= maxX || minY >= maxY) {
     return res.status(400).json({ error: 'Invalid bbox coordinates' });
+  }
+  const minZoom = minZoomRaw === '' || minZoomRaw == null ? undefined : Number(minZoomRaw);
+  const maxZoom = maxZoomRaw === '' || maxZoomRaw == null ? undefined : Number(maxZoomRaw);
+  if (minZoom !== undefined && (!Number.isInteger(minZoom) || minZoom < 0 || minZoom > 24)) {
+    return res.status(400).json({ error: 'minZoom must be an integer between 0 and 24' });
+  }
+  if (maxZoom !== undefined && (!Number.isInteger(maxZoom) || maxZoom < 0 || maxZoom > 24)) {
+    return res.status(400).json({ error: 'maxZoom must be an integer between 0 and 24' });
+  }
+  if (minZoom !== undefined && maxZoom !== undefined && minZoom > maxZoom) {
+    return res.status(400).json({ error: 'minZoom must not be greater than maxZoom' });
+  }
+
+  const parsedExtraArgs = parseAndValidateExtraArgs(req.body?.extraArgs);
+  if (parsedExtraArgs.error) {
+    return res.status(400).json({ error: parsedExtraArgs.error });
   }
 
   const bbox = `${minX},${minY},${maxX},${maxY}`;
@@ -96,6 +186,13 @@ app.post('/generate', (req: Request, res: Response) => {
     `--output=${outputFile}`,
     `--bbox=${bbox}`
   ];
+  if (minZoom !== undefined) {
+    args.push(`--minzoom=${minZoom}`);
+  }
+  if (maxZoom !== undefined) {
+    args.push(`--maxzoom=${maxZoom}`);
+  }
+  args.push(...parsedExtraArgs.args);
 
   let child: ReturnType<typeof spawn>;
   try {
@@ -152,10 +249,15 @@ app.post('/generate', (req: Request, res: Response) => {
     generationInProgress = false;
   });
 
-  return res.status(202).json({ started: true, filename, bbox });
+  return res.status(202).json({
+    started: true,
+    filename,
+    bbox,
+    args: [...(minZoom !== undefined ? [`--minzoom=${minZoom}`] : []), ...(maxZoom !== undefined ? [`--maxzoom=${maxZoom}`] : []), ...parsedExtraArgs.args]
+  });
 });
 
-app.get('/input-status', (_req: Request, res: Response) => {
+app.get('/input-status', actionRateLimiter, (_req: Request, res: Response) => {
   if (!fs.existsSync(INPUT_FILE)) {
     return res.json({ exists: false, downloading: downloadInProgress, inputFile: INPUT_FILE, sourceUrl: MAIN_OSM_URL });
   }
@@ -169,16 +271,7 @@ app.get('/input-status', (_req: Request, res: Response) => {
   });
 });
 
-app.post('/download-main-osm', (req: Request, res: Response) => {
-  const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
-  const now = Date.now();
-  const lastRequest = lastGenerateRequestByIp.get(clientIp) || 0;
-
-  if (now - lastRequest < GENERATE_RATE_LIMIT_MS) {
-    return res.status(429).json({ error: 'Too many requests, please wait before retrying' });
-  }
-  lastGenerateRequestByIp.set(clientIp, now);
-
+app.post('/download-main-osm', actionRateLimiter, (_req: Request, res: Response) => {
   if (downloadInProgress) {
     return res.status(409).json({ error: 'Input download already in progress' });
   }
@@ -188,13 +281,13 @@ app.post('/download-main-osm', (req: Request, res: Response) => {
   broadcast({ type: 'status', message: 'input_download_started' });
   broadcast({ type: 'log', stream: 'system', line: `Downloading input from ${MAIN_OSM_URL}` });
 
-  void (async () => {
+  const downloadTask = async () => {
     try {
       const response = await fetch(MAIN_OSM_URL);
       if (!response.ok || !response.body) {
         throw new Error(`Download failed with status ${response.status}`);
       }
-      await pipeline(Readable.fromWeb(response.body as never), fs.createWriteStream(tempInputFile));
+      await downloadToFile(response.body, tempInputFile);
       fs.renameSync(tempInputFile, INPUT_FILE);
       const stats = fs.statSync(INPUT_FILE);
       broadcast({ type: 'status', message: 'input_download_finished' });
@@ -209,7 +302,8 @@ app.post('/download-main-osm', (req: Request, res: Response) => {
     } finally {
       downloadInProgress = false;
     }
-  })();
+  };
+  downloadTask();
 
   return res.status(202).json({ started: true, sourceUrl: MAIN_OSM_URL, inputFile: INPUT_FILE });
 });

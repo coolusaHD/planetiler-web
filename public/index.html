@@ -16,7 +16,6 @@
       integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
       crossorigin=""
     ></script>
-    <script src="https://unpkg.com/leaflet-path-drag@0.0.14/Path.Drag.js"></script>
   </head>
   <body class="h-full text-slate-100">
     <main class="mx-auto flex h-full max-w-7xl flex-col gap-4 p-4 lg:p-6">
@@ -47,7 +46,13 @@
             <label class="flex flex-col gap-1 text-sm">minY<input id="minY" type="number" step="any" class="rounded border border-slate-600 bg-slate-800 p-2" /></label>
             <label class="flex flex-col gap-1 text-sm">maxX<input id="maxX" type="number" step="any" class="rounded border border-slate-600 bg-slate-800 p-2" /></label>
             <label class="flex flex-col gap-1 text-sm">maxY<input id="maxY" type="number" step="any" class="rounded border border-slate-600 bg-slate-800 p-2" /></label>
+            <label class="flex flex-col gap-1 text-sm">minZoom<input id="minZoom" type="number" min="0" max="24" step="1" class="rounded border border-slate-600 bg-slate-800 p-2" placeholder="optional" /></label>
+            <label class="flex flex-col gap-1 text-sm">maxZoom<input id="maxZoom" type="number" min="0" max="24" step="1" class="rounded border border-slate-600 bg-slate-800 p-2" placeholder="optional" /></label>
           </div>
+          <label class="flex flex-col gap-1 text-sm">
+            Additional Planetiler Args (one per line, e.g. --simplify-tolerance-at-max-zoom=0.7)
+            <textarea id="extraArgs" rows="4" class="rounded border border-slate-600 bg-slate-800 p-2 font-mono text-xs" placeholder="--threads=8\n--force"></textarea>
+          </label>
 
           <button
             id="startBtn"
@@ -82,6 +87,9 @@
       const startBtn = document.getElementById('startBtn');
       const inputStatus = document.getElementById('inputStatus');
       const downloadInputBtn = document.getElementById('downloadInputBtn');
+      const minZoomInput = document.getElementById('minZoom');
+      const maxZoomInput = document.getElementById('maxZoom');
+      const extraArgsInput = document.getElementById('extraArgs');
 
       const map = L.map('map');
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -92,9 +100,15 @@
       const initialBounds = L.latLngBounds([47.2, 8.4], [47.6, 8.9]);
       const rectangle = L.rectangle(initialBounds, {
         color: '#22d3ee',
-        weight: 2,
-        draggable: true
+        weight: 2
       }).addTo(map);
+      const cornerMarkers = {
+        sw: L.marker(initialBounds.getSouthWest(), { draggable: true }).addTo(map),
+        nw: L.marker(initialBounds.getNorthWest(), { draggable: true }).addTo(map),
+        ne: L.marker(initialBounds.getNorthEast(), { draggable: true }).addTo(map),
+        se: L.marker(initialBounds.getSouthEast(), { draggable: true }).addTo(map)
+      };
+      const centerMarker = L.marker(initialBounds.getCenter(), { draggable: true }).addTo(map);
 
       map.fitBounds(initialBounds.pad(0.5));
 
@@ -119,6 +133,15 @@
         inputs.maxY.value = b.getNorth().toFixed(6);
       }
 
+      function syncHandlesFromRectangle() {
+        const b = rectangle.getBounds();
+        cornerMarkers.sw.setLatLng(b.getSouthWest());
+        cornerMarkers.nw.setLatLng(b.getNorthWest());
+        cornerMarkers.ne.setLatLng(b.getNorthEast());
+        cornerMarkers.se.setLatLng(b.getSouthEast());
+        centerMarker.setLatLng(b.getCenter());
+      }
+
       function updateRectangleFromInputs() {
         const minX = Number(inputs.minX.value);
         const minY = Number(inputs.minY.value);
@@ -130,10 +153,45 @@
 
         const bounds = L.latLngBounds([minY, minX], [maxY, maxX]);
         rectangle.setBounds(bounds);
+        syncHandlesFromRectangle();
       }
 
-      rectangle.on('drag', updateInputsFromRectangle);
-      rectangle.on('dragend', updateInputsFromRectangle);
+      function updateRectangleFromCornerDrag() {
+        const sw = cornerMarkers.sw.getLatLng();
+        const nw = cornerMarkers.nw.getLatLng();
+        const ne = cornerMarkers.ne.getLatLng();
+        const se = cornerMarkers.se.getLatLng();
+
+        const minY = Math.min(sw.lat, se.lat, nw.lat, ne.lat);
+        const maxY = Math.max(sw.lat, se.lat, nw.lat, ne.lat);
+        const minX = Math.min(sw.lng, se.lng, nw.lng, ne.lng);
+        const maxX = Math.max(sw.lng, se.lng, nw.lng, ne.lng);
+        const bounds = L.latLngBounds([minY, minX], [maxY, maxX]);
+        rectangle.setBounds(bounds);
+        updateInputsFromRectangle();
+        syncHandlesFromRectangle();
+      }
+
+      function updateRectangleFromCenterDrag() {
+        const currentBounds = rectangle.getBounds();
+        const halfLat = (currentBounds.getNorth() - currentBounds.getSouth()) / 2;
+        const halfLng = (currentBounds.getEast() - currentBounds.getWest()) / 2;
+        const center = centerMarker.getLatLng();
+        const bounds = L.latLngBounds(
+          [center.lat - halfLat, center.lng - halfLng],
+          [center.lat + halfLat, center.lng + halfLng]
+        );
+        rectangle.setBounds(bounds);
+        updateInputsFromRectangle();
+        syncHandlesFromRectangle();
+      }
+
+      Object.values(cornerMarkers).forEach((marker) => {
+        marker.on('drag', updateRectangleFromCornerDrag);
+        marker.on('dragend', updateRectangleFromCornerDrag);
+      });
+      centerMarker.on('drag', updateRectangleFromCenterDrag);
+      centerMarker.on('dragend', updateRectangleFromCenterDrag);
 
       Object.values(inputs).forEach((input) => {
         input.addEventListener('input', updateRectangleFromInputs);
@@ -141,6 +199,7 @@
       });
 
       updateInputsFromRectangle();
+      syncHandlesFromRectangle();
 
       const events = new EventSource('/events');
       events.onmessage = (event) => {
@@ -181,6 +240,9 @@
         const minY = Number(inputs.minY.value);
         const maxX = Number(inputs.maxX.value);
         const maxY = Number(inputs.maxY.value);
+        const minZoom = minZoomInput.value === '' ? null : Number(minZoomInput.value);
+        const maxZoom = maxZoomInput.value === '' ? null : Number(maxZoomInput.value);
+        const extraArgs = extraArgsInput.value;
 
         startBtn.disabled = true;
         downloadLink.classList.add('hidden');
@@ -190,7 +252,7 @@
           const response = await fetch('/generate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ minX, minY, maxX, maxY })
+            body: JSON.stringify({ minX, minY, maxX, maxY, minZoom, maxZoom, extraArgs })
           });
 
           const body = await response.json();
@@ -199,6 +261,9 @@
           }
 
           appendLog(`[system] Generation accepted for bbox=${body.bbox}`);
+          if (Array.isArray(body.args) && body.args.length > 0) {
+            appendLog(`[system] Extra args: ${body.args.join(' ')}`);
+          }
           setStatus('Generation running...');
         } catch (error) {
           appendLog(`[error] ${error.message}`);
