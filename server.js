@@ -5,6 +5,7 @@ const path = require('path');
 
 const PORT = process.env.PORT || 8080;
 const PLANETILER_JAR = process.env.PLANETILER_JAR || path.join(__dirname, 'planetiler.jar');
+const JAVA_XMX = process.env.JAVA_XMX || '4G';
 const INPUT_FILE = process.env.INPUT_FILE || '/data/input/input.osm.pbf';
 const OUTPUT_DIR = process.env.OUTPUT_DIR || '/data/output';
 
@@ -17,6 +18,7 @@ app.use('/output', express.static(OUTPUT_DIR));
 
 const clients = new Set();
 let currentProcess = null;
+let generationInProgress = false;
 
 function broadcast(payload) {
   const message = `data: ${JSON.stringify(payload)}\n\n`;
@@ -45,7 +47,7 @@ app.get('/events', (req, res) => {
 });
 
 app.post('/generate', (req, res) => {
-  if (currentProcess) {
+  if (generationInProgress) {
     return res.status(409).json({ error: 'A generation process is already running' });
   }
 
@@ -63,8 +65,10 @@ app.post('/generate', (req, res) => {
   const filename = `export_${timestamp}.pmtiles`;
   const outputFile = path.join(OUTPUT_DIR, filename);
 
+  generationInProgress = true;
+
   const args = [
-    '-Xmx4G',
+    `-Xmx${JAVA_XMX}`,
     '-jar',
     PLANETILER_JAR,
     `--osm_path=${INPUT_FILE}`,
@@ -72,7 +76,13 @@ app.post('/generate', (req, res) => {
     `--bbox=${bbox}`
   ];
 
-  const child = spawn('java', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  let child;
+  try {
+    child = spawn('java', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (error) {
+    generationInProgress = false;
+    return res.status(500).json({ error: error.message });
+  }
   currentProcess = child;
 
   broadcast({ type: 'status', message: 'generation_started', filename });
@@ -99,6 +109,7 @@ app.post('/generate', (req, res) => {
   child.on('error', (error) => {
     broadcast({ type: 'error', message: error.message });
     currentProcess = null;
+    generationInProgress = false;
   });
 
   child.on('close', (code) => {
@@ -113,6 +124,7 @@ app.post('/generate', (req, res) => {
       broadcast({ type: 'error', message: `Planetiler exited with code ${code}` });
     }
     currentProcess = null;
+    generationInProgress = false;
   });
 
   res.status(202).json({ started: true, filename, bbox });
