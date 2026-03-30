@@ -1,0 +1,9 @@
+node_modules/
+data/output/
+data/input/
+data/sources/
+
+# Prevent accidental large/binary data commits
+*.zip
+*.pdf
+*.pbf
