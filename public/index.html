@@ -32,6 +32,16 @@
 
         <div class="flex flex-col gap-4 rounded-xl border border-slate-700 bg-slate-900 p-4">
           <h2 class="text-lg font-semibold">Bounding Box</h2>
+          <div class="rounded-lg border border-slate-700 bg-slate-950 p-3 text-sm">
+            <div class="mb-2 font-medium text-slate-200">Main OSM Input</div>
+            <div id="inputStatus" class="text-slate-300">Checking input file...</div>
+            <button
+              id="downloadInputBtn"
+              class="mt-3 rounded-lg bg-emerald-500 px-3 py-2 text-sm font-semibold text-slate-900 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Download Baden-Württemberg Extract
+            </button>
+          </div>
           <div class="grid grid-cols-2 gap-3">
             <label class="flex flex-col gap-1 text-sm">minX<input id="minX" type="number" step="any" class="rounded border border-slate-600 bg-slate-800 p-2" /></label>
             <label class="flex flex-col gap-1 text-sm">minY<input id="minY" type="number" step="any" class="rounded border border-slate-600 bg-slate-800 p-2" /></label>
@@ -70,6 +80,8 @@
       const statusEl = document.getElementById('status');
       const downloadLink = document.getElementById('downloadLink');
       const startBtn = document.getElementById('startBtn');
+      const inputStatus = document.getElementById('inputStatus');
+      const downloadInputBtn = document.getElementById('downloadInputBtn');
 
       const map = L.map('map');
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -93,6 +105,10 @@
 
       function setStatus(text) {
         statusEl.textContent = text;
+      }
+
+      function setInputStatus(text) {
+        inputStatus.textContent = text;
       }
 
       function updateInputsFromRectangle() {
@@ -133,6 +149,14 @@
           if (payload.type === 'ping') return;
           if (payload.type === 'log') appendLog(`[${payload.stream}] ${payload.line}`);
           if (payload.type === 'status') setStatus(payload.message);
+          if (payload.type === 'status' && payload.message === 'input_download_started') {
+            setInputStatus('Downloading main input file...');
+            downloadInputBtn.disabled = true;
+          }
+          if (payload.type === 'status' && payload.message === 'input_download_finished') {
+            setInputStatus('Input file downloaded and ready.');
+            downloadInputBtn.disabled = false;
+          }
           if (payload.type === 'done') {
             setStatus('Generation finished');
             startBtn.disabled = false;
@@ -183,7 +207,47 @@
         }
       }
 
+      async function refreshInputStatus() {
+        try {
+          const response = await fetch('/input-status');
+          const body = await response.json();
+          if (body.downloading) {
+            setInputStatus('Downloading main input file...');
+            downloadInputBtn.disabled = true;
+          } else if (body.exists) {
+            setInputStatus(`Input ready (${Math.round((body.sizeBytes || 0) / (1024 * 1024))} MB)`);
+            downloadInputBtn.disabled = false;
+          } else {
+            setInputStatus('Input missing. Download required before generation.');
+            downloadInputBtn.disabled = false;
+          }
+        } catch (error) {
+          setInputStatus(`Could not check input status: ${error.message}`);
+          downloadInputBtn.disabled = false;
+        }
+      }
+
+      async function downloadInput() {
+        downloadInputBtn.disabled = true;
+        setInputStatus('Starting input download...');
+        try {
+          const response = await fetch('/download-main-osm', { method: 'POST' });
+          const body = await response.json();
+          if (!response.ok) {
+            throw new Error(body.error || 'Failed to start download');
+          }
+          appendLog(`[system] Input download started from ${body.sourceUrl}`);
+          setInputStatus('Downloading main input file...');
+        } catch (error) {
+          appendLog(`[error] ${error.message}`);
+          setInputStatus(`Download failed: ${error.message}`);
+          downloadInputBtn.disabled = false;
+        }
+      }
+
+      refreshInputStatus();
       startBtn.addEventListener('click', startGeneration);
+      downloadInputBtn.addEventListener('click', downloadInput);
     </script>
   </body>
 </html>

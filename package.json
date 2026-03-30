@@ -3,14 +3,21 @@
   "version": "1.0.0",
   "private": true,
   "description": "Local Planetiler GUI tool",
-  "main": "server.js",
+  "packageManager": "pnpm@10.18.3",
   "scripts": {
-    "start": "node server.js"
+    "start": "tsx server.ts",
+    "typecheck": "tsc --noEmit"
   },
   "engines": {
     "node": ">=24"
   },
   "dependencies": {
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "tsx": "^4.20.6"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.6.0",
+    "typescript": "^5.9.3"
   }
 }

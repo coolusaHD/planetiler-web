@@ -6,10 +6,12 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY package.json ./
-RUN npm install --omit=dev
+RUN corepack enable
 
-COPY server.js ./
+COPY package.json pnpm-lock.yaml* ./
+RUN pnpm install --frozen-lockfile
+
+COPY server.ts tsconfig.json ./
 COPY public ./public
 
 RUN mkdir -p /data/input /data/output \
@@ -17,4 +19,4 @@ RUN mkdir -p /data/input /data/output \
 
 EXPOSE 8080
 
-CMD ["npm", "start"]
+CMD ["pnpm", "start"]
