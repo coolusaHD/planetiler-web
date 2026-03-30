@@ -18,7 +18,7 @@ Lokales Planetiler-GUI in Docker (Node.js 24 + OpenJDK 25), mit:
 1. Verzeichnisse anlegen:
 
 ```bash
-mkdir -p data/input data/output
+mkdir -p data/input data/output data/sources
 ```
 
 2. App starten:
@@ -51,6 +51,11 @@ Quelle für den integrierten Download:
 4. **Start Generation** klicken
 5. Live-Logs beobachten
 6. Nach Abschluss den Download-Link verwenden
+
+Hinweis: Der Generator startet mit `--download`, damit Planetiler fehlende Zusatzdaten
+(z. B. `data/sources/lake_centerline.shp.zip`) automatisch nachlaedt.
+Der erste Lauf kann dadurch laenger dauern.
+Diese Zusatzdaten werden in `data/sources` gespeichert und bei spaeteren Runs wiederverwendet.
 
 ## Lokale Entwicklung (ohne Docker)
 
