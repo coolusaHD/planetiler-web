@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en" class="h-full bg-slate-950">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Planetiler GUI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <script src="https://unpkg.com/leaflet-path-drag@0.0.14/Path.Drag.js"></script>
+  </head>
+  <body class="h-full text-slate-100">
+    <main class="mx-auto flex h-full max-w-7xl flex-col gap-4 p-4 lg:p-6">
+      <header>
+        <h1 class="text-2xl font-bold">Planetiler GUI Dashboard</h1>
+        <p class="text-sm text-slate-300">Generate PMTiles from local OSM extracts in Docker.</p>
+      </header>
+
+      <section class="grid flex-1 grid-cols-1 gap-4 lg:grid-cols-3">
+        <div class="col-span-2 overflow-hidden rounded-xl border border-slate-700 bg-slate-900">
+          <div id="map" class="h-[500px] w-full"></div>
+        </div>
+
+        <div class="flex flex-col gap-4 rounded-xl border border-slate-700 bg-slate-900 p-4">
+          <h2 class="text-lg font-semibold">Bounding Box</h2>
+          <div class="grid grid-cols-2 gap-3">
+            <label class="flex flex-col gap-1 text-sm">minX<input id="minX" type="number" step="any" class="rounded border border-slate-600 bg-slate-800 p-2" /></label>
+            <label class="flex flex-col gap-1 text-sm">minY<input id="minY" type="number" step="any" class="rounded border border-slate-600 bg-slate-800 p-2" /></label>
+            <label class="flex flex-col gap-1 text-sm">maxX<input id="maxX" type="number" step="any" class="rounded border border-slate-600 bg-slate-800 p-2" /></label>
+            <label class="flex flex-col gap-1 text-sm">maxY<input id="maxY" type="number" step="any" class="rounded border border-slate-600 bg-slate-800 p-2" /></label>
+          </div>
+
+          <button
+            id="startBtn"
+            class="mt-2 rounded-lg bg-cyan-500 px-4 py-3 text-base font-semibold text-slate-900 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Start Generation
+          </button>
+
+          <div class="rounded-lg border border-slate-700 bg-slate-950 p-3 text-sm">
+            <div id="status" class="font-medium text-cyan-300">Ready</div>
+            <a id="downloadLink" href="#" class="mt-2 hidden text-cyan-400 underline" download>Download latest .pmtiles</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="rounded-xl border border-slate-700 bg-slate-900 p-4">
+        <h2 class="mb-2 text-lg font-semibold">Live Logs</h2>
+        <pre id="logs" class="h-64 overflow-auto whitespace-pre-wrap rounded bg-slate-950 p-3 text-xs text-slate-200"></pre>
+      </section>
+    </main>
+
+    <script>
+      const inputs = {
+        minX: document.getElementById('minX'),
+        minY: document.getElementById('minY'),
+        maxX: document.getElementById('maxX'),
+        maxY: document.getElementById('maxY')
+      };
+      const logs = document.getElementById('logs');
+      const statusEl = document.getElementById('status');
+      const downloadLink = document.getElementById('downloadLink');
+      const startBtn = document.getElementById('startBtn');
+
+      const map = L.map('map');
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; OpenStreetMap contributors'
+      }).addTo(map);
+
+      const initialBounds = L.latLngBounds([47.2, 8.4], [47.6, 8.9]);
+      const rectangle = L.rectangle(initialBounds, {
+        color: '#22d3ee',
+        weight: 2,
+        draggable: true
+      }).addTo(map);
+
+      map.fitBounds(initialBounds.pad(0.5));
+
+      function appendLog(line) {
+        logs.textContent += `${line}\n`;
+        logs.scrollTop = logs.scrollHeight;
+      }
+
+      function setStatus(text) {
+        statusEl.textContent = text;
+      }
+
+      function updateInputsFromRectangle() {
+        const b = rectangle.getBounds();
+        inputs.minX.value = b.getWest().toFixed(6);
+        inputs.minY.value = b.getSouth().toFixed(6);
+        inputs.maxX.value = b.getEast().toFixed(6);
+        inputs.maxY.value = b.getNorth().toFixed(6);
+      }
+
+      function updateRectangleFromInputs() {
+        const minX = Number(inputs.minX.value);
+        const minY = Number(inputs.minY.value);
+        const maxX = Number(inputs.maxX.value);
+        const maxY = Number(inputs.maxY.value);
+
+        if (![minX, minY, maxX, maxY].every(Number.isFinite)) return;
+        if (minX >= maxX || minY >= maxY) return;
+
+        const bounds = L.latLngBounds([minY, minX], [maxY, maxX]);
+        rectangle.setBounds(bounds);
+      }
+
+      rectangle.on('drag', updateInputsFromRectangle);
+      rectangle.on('dragend', updateInputsFromRectangle);
+
+      Object.values(inputs).forEach((input) => {
+        input.addEventListener('input', updateRectangleFromInputs);
+        input.addEventListener('change', updateRectangleFromInputs);
+      });
+
+      updateInputsFromRectangle();
+
+      const events = new EventSource('/events');
+      events.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.type === 'ping') return;
+          if (payload.type === 'log') appendLog(`[${payload.stream}] ${payload.line}`);
+          if (payload.type === 'status') setStatus(payload.message);
+          if (payload.type === 'done') {
+            setStatus('Generation finished');
+            startBtn.disabled = false;
+            if (payload.downloadUrl) {
+              downloadLink.href = payload.downloadUrl;
+              downloadLink.classList.remove('hidden');
+              downloadLink.textContent = `Download ${payload.filename}`;
+            }
+          }
+          if (payload.type === 'error') {
+            appendLog(`[error] ${payload.message}`);
+            setStatus('Generation failed');
+            startBtn.disabled = false;
+          }
+        } catch {
+          appendLog(event.data);
+        }
+      };
+
+      async function startGeneration() {
+        const minX = Number(inputs.minX.value);
+        const minY = Number(inputs.minY.value);
+        const maxX = Number(inputs.maxX.value);
+        const maxY = Number(inputs.maxY.value);
+
+        startBtn.disabled = true;
+        downloadLink.classList.add('hidden');
+        setStatus('Starting generation...');
+
+        try {
+          const response = await fetch('/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ minX, minY, maxX, maxY })
+          });
+
+          const body = await response.json();
+          if (!response.ok) {
+            throw new Error(body.error || 'Failed to start generation');
+          }
+
+          appendLog(`[system] Generation accepted for bbox=${body.bbox}`);
+          setStatus('Generation running...');
+        } catch (error) {
+          appendLog(`[error] ${error.message}`);
+          setStatus('Could not start generation');
+          startBtn.disabled = false;
+        }
+      }
+
+      startBtn.addEventListener('click', startGeneration);
+    </script>
+  </body>
+</html>
