@@ -3,6 +3,14 @@ import express, { type Request, type Response } from 'express'
 import rateLimit from 'express-rate-limit'
 import fs from 'fs'
 import path from 'path'
+import {
+  countRasterTiles,
+  isRasterRendererAvailable,
+  RASTER_MAX_TILES,
+  RASTER_MAX_ZOOM,
+  renderRasterPmtiles,
+  type RasterFormat
+} from './raster'
 
 const PORT = Number(process.env.PORT || 8080)
 const PLANETILER_JAR =
@@ -221,10 +229,41 @@ app.post('/generate', actionRateLimiter, (req: Request, res: Response) => {
     return res.status(400).json({ error: parsedExtraArgs.error })
   }
 
+  const raster = req.body?.raster === true
+  const rasterMinZoom = minZoom ?? 0
+  const rasterMaxZoomRaw = req.body?.rasterMaxZoom
+  const rasterMaxZoom =
+    rasterMaxZoomRaw === '' || rasterMaxZoomRaw == null ? 18 : Number(rasterMaxZoomRaw)
+  const rasterFormat: RasterFormat = req.body?.rasterFormat === 'png' ? 'png' : 'webp'
+  let rasterTiles = 0
+  if (raster) {
+    if (!isRasterRendererAvailable()) {
+      return res.status(400).json({
+        error: 'Raster rendering needs tileserver-gl, which only the Docker image provides'
+      })
+    }
+    if (
+      !Number.isInteger(rasterMaxZoom) ||
+      rasterMaxZoom < rasterMinZoom ||
+      rasterMaxZoom > RASTER_MAX_ZOOM
+    ) {
+      return res.status(400).json({
+        error: `rasterMaxZoom must be an integer between ${rasterMinZoom} and ${RASTER_MAX_ZOOM}`
+      })
+    }
+    rasterTiles = countRasterTiles({ minX, minY, maxX, maxY }, rasterMinZoom, rasterMaxZoom)
+    if (rasterTiles > RASTER_MAX_TILES) {
+      return res.status(400).json({
+        error: `Raster output would need ${rasterTiles} tiles (max ${RASTER_MAX_TILES}); shrink the bbox or lower rasterMaxZoom`
+      })
+    }
+  }
+
   const bbox = `${minX},${minY},${maxX},${maxY}`
   const timestamp = Math.floor(Date.now() / 1000)
   const filename = `export_${timestamp}.pmtiles`
   const outputFile = path.join(OUTPUT_DIR, filename)
+  const rasterFilename = `export_${timestamp}_raster.pmtiles`
 
   generationInProgress = true
 
@@ -304,28 +343,52 @@ app.post('/generate', actionRateLimiter, (req: Request, res: Response) => {
     generationInProgress = false
   })
 
-  child.on('close', (code: number | null) => {
-    if (code === 0) {
+  child.on('close', async (code: number | null) => {
+    currentProcess = null
+    try {
+      if (code !== 0) {
+        broadcast({
+          type: 'error',
+          message: `Planetiler exited with code ${code}`
+        })
+        return
+      }
+      if (raster) {
+        broadcast({ type: 'status', message: 'raster_rendering_started' })
+        await renderRasterPmtiles({
+          vectorFile: outputFile,
+          outputFile: path.join(OUTPUT_DIR, rasterFilename),
+          bbox: { minX, minY, maxX, maxY },
+          minZoom: rasterMinZoom,
+          maxZoom: rasterMaxZoom,
+          format: rasterFormat,
+          log: (line) => broadcast({ type: 'log', stream: 'raster', line })
+        })
+      }
+      const finishedFile = raster ? rasterFilename : filename
       broadcast({
         type: 'done',
         message: 'generation_finished',
-        filename,
-        downloadUrl: `/output/${filename}`
+        filename: finishedFile,
+        downloadUrl: `/output/${finishedFile}`
       })
-    } else {
+    } catch (error) {
       broadcast({
         type: 'error',
-        message: `Planetiler exited with code ${code}`
+        message: `Raster rendering failed: ${(error as Error).message}`
       })
+    } finally {
+      generationInProgress = false
     }
-    currentProcess = null
-    generationInProgress = false
   })
 
   return res.status(202).json({
     started: true,
     filename,
     bbox,
+    raster: raster
+      ? { minZoom: rasterMinZoom, maxZoom: rasterMaxZoom, format: rasterFormat, tiles: rasterTiles }
+      : null,
     args: [
       ...(minZoom !== undefined ? [`--minzoom=${minZoom}`] : []),
       ...(maxZoom !== undefined ? [`--maxzoom=${maxZoom}`] : []),
