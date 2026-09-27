@@ -269,6 +269,9 @@ app.post('/generate', actionRateLimiter, (req: Request, res: Response) => {
   const filename = `export_${timestamp}.pmtiles`
   const outputFile = path.join(OUTPUT_DIR, filename)
   const rasterFilename = `export_${timestamp}_raster.pmtiles`
+  // tileserver-gl draws a 256 px tile at zoom z from the vector tiles at z - 1.
+  const planetilerMinZoom =
+    raster && minZoom !== undefined ? Math.max(0, minZoom - 1) : minZoom
 
   generationInProgress = true
 
@@ -286,8 +289,8 @@ app.post('/generate', actionRateLimiter, (req: Request, res: Response) => {
     `--water=true`,
     `--transportation=true`
   ]
-  if (minZoom !== undefined) {
-    args.push(`--minzoom=${minZoom}`)
+  if (planetilerMinZoom !== undefined) {
+    args.push(`--minzoom=${planetilerMinZoom}`)
   }
   if (maxZoom !== undefined) {
     args.push(`--maxzoom=${maxZoom}`)
@@ -395,7 +398,7 @@ app.post('/generate', actionRateLimiter, (req: Request, res: Response) => {
       ? { minZoom: rasterMinZoom, maxZoom: rasterMaxZoom, format: rasterFormat, tiles: rasterTiles }
       : null,
     args: [
-      ...(minZoom !== undefined ? [`--minzoom=${minZoom}`] : []),
+      ...(planetilerMinZoom !== undefined ? [`--minzoom=${planetilerMinZoom}`] : []),
       ...(maxZoom !== undefined ? [`--maxzoom=${maxZoom}`] : []),
       ...(PLANETILER_AUTO_DOWNLOAD_AUX &&
       !hasArg(parsedExtraArgs.args, '--download') &&
