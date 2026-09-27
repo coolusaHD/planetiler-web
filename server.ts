@@ -41,6 +41,11 @@ app.use(express.static(path.join(__dirname, 'public')))
 app.use('/output', express.static(OUTPUT_DIR))
 app.set('trust proxy', 1)
 
+// Probed by the HEALTHCHECK inherited from the tileserver-gl base image.
+app.get('/health', (_req: Request, res: Response) => {
+  res.send('OK')
+})
+
 const clients = new Set<Response>()
 let currentProcess: ReturnType<typeof spawn> | null = null
 let generationInProgress = false
