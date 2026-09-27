@@ -66,6 +66,8 @@ können – z. B. `flutter_map` mit `flutter_map_pmtiles` –, brauchen ein Rast
 - Nach Planetiler rendert tileserver-gl (Stil `basic-preview`) jede Kachel der BBOX als WebP oder PNG.
 - Gerendert wird von `minZoom` (sonst 0) bis `raster maxZoom` (Standard 18, max. 19). Zoomstufen über
   dem Vektor-`maxZoom` entstehen aus den detailliertesten Vektorkacheln.
+- Planetiler läuft dafür eine Zoomstufe unter `minZoom`: tileserver-gl zeichnet eine Rasterkachel der
+  Stufe z aus den Vektorkacheln der Stufe z − 1.
 - Ergebnis: `export_<zeitstempel>_raster.pmtiles`, geclustert, neben der Vektordatei in `data/output`.
 - Maximal 20.000 Kacheln pro Lauf; sonst BBOX verkleinern oder `raster maxZoom` senken.
 - Funktioniert nur im Docker-Image (tileserver-gl ist Teil des Basis-Images).
