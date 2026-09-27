@@ -9,5 +9,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["server.ts"]
+  "include": ["server.ts", "raster.ts", "raster.test.ts"]
 }

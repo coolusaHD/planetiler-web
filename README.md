@@ -57,6 +57,24 @@ Hinweis: Der Generator startet mit `--download`, damit Planetiler fehlende Zusat
 Der erste Lauf kann dadurch laenger dauern.
 Diese Zusatzdaten werden in `data/sources` gespeichert und bei spaeteren Runs wiederverwendet.
 
+## Raster-PMTiles (für Apps ohne Vektor-Renderer)
+
+Planetiler erzeugt Vektorkacheln (MVT, OpenMapTiles-Schema). Apps, die nur Bildkacheln anzeigen
+können – z. B. `flutter_map` mit `flutter_map_pmtiles` –, brauchen ein Raster-Archiv. Dafür in der UI
+**Render raster PMTiles** anhaken:
+
+- Nach Planetiler rendert tileserver-gl (Stil `basic-preview`) jede Kachel der BBOX als WebP oder PNG.
+- Gerendert wird von `minZoom` (sonst 0) bis `raster maxZoom` (Standard 18, max. 19). Zoomstufen über
+  dem Vektor-`maxZoom` entstehen aus den detailliertesten Vektorkacheln.
+- Ergebnis: `export_<zeitstempel>_raster.pmtiles`, geclustert, neben der Vektordatei in `data/output`.
+- Maximal 20.000 Kacheln pro Lauf; sonst BBOX verkleinern oder `raster maxZoom` senken.
+- Funktioniert nur im Docker-Image (tileserver-gl ist Teil des Basis-Images).
+
+Rechtliches: Die Kacheln entstehen lokal aus dem eigenen OSM-Extrakt; die Tile-Server von
+openstreetmap.org werden dafür nicht abgefragt. Wer die Karte zeigt, muss
+**© OpenMapTiles © OpenStreetMap contributors** sichtbar angeben (CC-BY 4.0 für den Stil, ODbL für die
+Daten). Der Text steht auch im `attribution`-Feld der Metadaten.
+
 ## Lokale Entwicklung (ohne Docker)
 
 ```bash
